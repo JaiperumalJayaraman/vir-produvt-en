@@ -84,6 +84,7 @@
     },
   ];
   const pages = [
+    ["Overview", "package-open"],
     ["Requests", "clipboard-list"],
     ["Inventory", "package"],
     ["Loan register", "book-open"],
@@ -91,7 +92,7 @@
   ];
   const original = () => ({
     version: 1,
-    tab: "Requests",
+    tab: "Overview",
     phase: 0,
     selected: "",
     filter: "All items",
@@ -158,9 +159,123 @@
     "</div></div>";
   const badge = (t, good = false) =>
     '<span class="tag' + (good ? " good" : "") + '">' + esc(t) + "</span>";
+
+  // One question per view: show the current action before operational details.
+  // Every figure below comes from the same fictional slips used by the register.
+  function overview() {
+    const film = getReq("RQ-214");
+    const slips = s.loans.filter((loan) => loan.req === film.id);
+    const issuedTypes = new Set(slips.map((loan) => getAsset(loan.asset).type));
+    const missingTypes = film.items.filter((type) => !issuedTypes.has(type));
+    const returned = slips.filter((loan) => loan.back).length;
+    const openKit = slips.filter((loan) => !loan.back);
+    const otherOpen = s.loans.filter((loan) => loan.req !== film.id && !loan.back).length;
+    const notedThisPhase = s.notes.some((note) => note.phase === s.phase);
+
+    let title, explanation, action, label, tone = "action";
+    if (missingTypes.length) {
+      title = "Finish issuing the Film Society kit";
+      explanation = missingTypes.length + " approved " +
+        (missingTypes.length === 1 ? "item has" : "items have") +
+        " no issue slip: " + missingTypes.join(", ") + ". Check the inventory before Kabir leaves.";
+      action = "issue"; label = "Create issue slip";
+    } else if (s.phase === 0 && !notedThisPhase) {
+      title = "The screening kit is ready";
+      explanation = "All three approved units have issue slips. Record Kabir's pickup for the next shift.";
+      action = "go-notes"; label = "Add pickup note";
+      tone = "ready";
+    } else if (s.phase === 0) {
+      title = "Pickup recorded — move to the return";
+      explanation = "The full kit is issued and the handover note is saved. Advance the sample time when ready.";
+      action = "advance"; label = "Move to return time";
+      tone = "ready";
+    } else if (s.phase === 1 && openKit.some((loan) => ["PR-04", "SP-02"].includes(loan.asset))) {
+      title = "Record the items Kabir brought back";
+      explanation = "The projector and speaker have arrived. Close their slips; AD-12 stays out with Leela.";
+      action = "show-loans"; label = "Record partial returns";
+    } else if (s.phase === 1 && openKit.length && !notedThisPhase) {
+      title = "Adapter " + openKit.map((loan) => loan.asset).join(", ") + " is still out";
+      explanation = "Kabir returned the projector and speaker. Leave a note that Leela will drop off the remaining unit at 9 am tomorrow.";
+      action = "go-notes"; label = "Write handover note";
+    } else if (s.phase === 1) {
+      title = openKit.length ? "Partial return handed over" : "All kit items have been returned";
+      explanation = "The returns and handover can now be reviewed by the morning shift.";
+      action = "advance"; label = "Move to next morning";
+      tone = "ready";
+    } else if (openKit.length) {
+      title = "Close " + openKit.map((loan) => loan.asset).join(", ") + "'s return";
+      explanation = "Leela is at the counter. Confirm the physical unit and record the outstanding return under RQ-214.";
+      action = "show-loans"; label = "Open outstanding slips";
+    } else {
+      title = "Film Society kit fully returned";
+      explanation = "All " + slips.length + " issued units are back. The Debate Union microphone is tracked separately.";
+      action = "show-all"; label = "Review closed slips";
+      tone = "ready";
+    }
+
+    const metric = (label, value, denominator, sub, percent) =>
+      '<div class="metric"><span class="metric-label">' + esc(label) + '</span>' +
+      '<div class="metric-value"><strong>' + esc(value) + '</strong>' +
+      (denominator === null ? '' : '<span> / ' + esc(denominator) + '</span>') +
+      '</div><small>' + esc(sub) + '</small>' +
+      (percent === null ? '' : '<div class="metric-track" role="progressbar" aria-label="' +
+        esc(label) + '" aria-valuemin="0" aria-valuemax="' + esc(denominator) +
+        '" aria-valuenow="' + esc(value) + '"><span style="width:' + percent + '%"></span></div>') +
+      '</div>';
+
+    let result = head("What needs attention now?", "One desk · Film Society request RQ-214");
+    result += '<section class="priority-panel" data-tone="' + esc(tone) +
+      '" aria-label="Recommended next action"><small class="priority-label">' +
+      (tone === "ready" ? "STEP COMPLETED" : "NEXT ACTION") +
+      ' · ' + esc(shifts[s.phase].time) + '</small><h3>' +
+      esc(title) + '</h3><p>' + esc(explanation) + '</p>' +
+      '<div class="priority-actions">' + btn(label, action, "", "primary") +
+      btn("View approved request", "go-request", "", "quiet-action") +
+      '</div></section>';
+
+    result += '<div class="metrics" aria-label="Live sample shift metrics">' +
+      metric("Kit issued", issuedTypes.size, film.items.length,
+        "of 3 approved equipment types", 100 * issuedTypes.size / film.items.length) +
+      metric("Kit returned", returned, slips.length, slips.length
+        ? "of " + slips.length + " issued units" : "No kit slips issued yet",
+        slips.length ? 100 * returned / slips.length : null) +
+      metric("Other loans out", otherOpen, null,
+        "physical units outside RQ-214", null) +
+      '</div>';
+
+    result += '<div class="overview-detail"><section class="overview-equipment"><div class="overview-section-head">' +
+      '<div><h3>Film Society equipment</h3><small>Unit status · current sample shift</small></div>' +
+      btn("Open loan register", "show-loans", "", "quiet-action") + '</div><ul class="equipment-list">';
+    for (const type of film.items) {
+      const matches = slips.filter((loan) => getAsset(loan.asset).type === type);
+      const active = matches.find((loan) => !loan.back);
+      const chosen = active || matches[matches.length - 1];
+      const status = !chosen ? "Not issued" : active ? "On loan" : "Returned";
+      const style = status === "Returned" ? "is-done" : status === "On loan" ? "is-out" : "is-pending";
+      result += '<li><div><strong>' + esc(type) + '</strong><small>' +
+        esc(chosen ? chosen.asset : "Approved · no slip yet") + '</small></div>' +
+        '<span class="status-label ' + style + '">' + esc(status) + '</span></li>';
+    }
+    result += '</ul></section><section class="overview-handover">' +
+      '<h3>Latest handover</h3><small>From the Desk book · sample data</small>';
+    const note = s.notes[s.notes.length - 1];
+    if (note) {
+      result += '<p class="handover-quote">' + esc(note.text) + '</p>' +
+        '<small>Staff note · ' + esc(shifts[note.phase].time) + '</small>';
+    } else if (s.phase > 0) {
+      result += '<p class="handover-quote">Kabir says Leela has the adapter and will return it at 9 am Saturday.</p>' +
+        '<small>Film Society message · Friday 7:30 pm</small>';
+    } else {
+      result += '<p class="handover-quote">No staff handover note yet. Record who collected the kit before moving shifts.</p>';
+    }
+    result += '<div class="handover-link">' + btn("Open Desk book", "go-notes", "", "quiet-action") +
+      '</div></section></div>';
+    return result;
+  }
+
   function requestPage() {
     let html = head(
-      "Approved requests",
+      "What equipment was approved?",
       "Student Activities Office · 3 approved forms",
     );
     if (s.selected) {
@@ -196,8 +311,8 @@
   }
   function inventory() {
     let html = head(
-      "Inventory",
-      "Physical units · home shelf and current availability",
+      "Which units are available?",
+      "Physical units · shelf location and current availability",
     );
     html +=
       '<div class="buttons"><label>Show <select data-filter>' +
@@ -222,7 +337,7 @@
   }
   function register() {
     let html = head(
-      "Loan register",
+      "Which items still need to come back?",
       "Grouped by approved request · One slip per physical unit",
       s.editing
         ? btn("Cancel", "cancel")
@@ -298,7 +413,7 @@
 
   function deskbook() {
     let html = head(
-      "Desk book",
+      "What must the next shift know?",
       "Messages from clubs and notes for the next shift",
     );
     const entries = [
@@ -336,6 +451,7 @@
     );
   }
   const screens = {
+    Overview: overview,
     Requests: requestPage,
     Inventory: inventory,
     "Loan register": register,
@@ -388,6 +504,29 @@
       case "advance":
         if (s.phase < 2) s.phase++;
         s.notice = "Shift time updated.";
+        break;
+      case "issue":
+        s.tab = "Loan register";
+        s.editing = true;
+        break;
+      case "show-loans":
+        s.tab = "Loan register";
+        s.editing = false;
+        s.onlyOpen = true;
+        break;
+      case "show-all":
+        s.tab = "Loan register";
+        s.editing = false;
+        s.onlyOpen = false;
+        break;
+      case "go-notes":
+        s.tab = "Desk book";
+        s.editing = false;
+        break;
+      case "go-request":
+        s.tab = "Requests";
+        s.selected = "RQ-214";
+        s.editing = false;
         break;
       case "tab":
         s.tab = v;
